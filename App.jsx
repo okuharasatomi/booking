@@ -112,7 +112,7 @@ export default function App() {
         await signInAnonymously(auth);
       } catch (e) {
         console.error("Firebase Init Error:", e);
-        setInitError("初期化に失敗しました。設定を確認してください。");
+        setInitError("初期化に失敗しました。Firebaseの匿名認証設定を確認してください。");
       }
     };
     init();
@@ -255,7 +255,7 @@ export default function App() {
       
       await setDoc(custDoc, { name: customerName, lastReservedAt: Timestamp.now() }, { merge: true });
       setStep(5);
-    } catch (err) { alert("予約に失敗しました。"); }
+    } catch (err) { alert("予約に失敗しました。認証設定を確認してください。"); }
     setLoading(false);
   };
 
@@ -268,11 +268,11 @@ export default function App() {
   // ビュー出力
   if (initError) return (
     <div className="min-h-screen bg-red-50 flex items-center justify-center p-6 text-center">
-      <div className="bg-white p-10 rounded-[48px] shadow-2xl border-4 border-red-100 max-w-md">
+      <div className="bg-white p-10 rounded-[48px] shadow-2xl border-4 border-red-100 max-w-md font-black">
         <AlertCircle className="w-20 h-20 text-red-500 mx-auto mb-6" />
-        <h2 className="text-2xl font-black mb-4">接続エラー</h2>
+        <h2 className="text-2xl mb-4 text-slate-800">接続エラー</h2>
         <p className="text-slate-600 mb-8 leading-relaxed font-bold">{String(initError)}</p>
-        <button onClick={() => window.location.reload()} className="w-full bg-slate-800 text-white py-5 rounded-full shadow-lg">再読み込み</button>
+        <button onClick={() => window.location.reload()} className="w-full bg-slate-800 text-white py-5 rounded-full shadow-lg active:scale-95 transition-all">再読み込み</button>
       </div>
     </div>
   );
@@ -396,12 +396,17 @@ export default function App() {
                 </tbody>
               </table>
             </div>
+            <div className="mt-12 flex justify-center space-x-12 text-lg font-black uppercase bg-white py-8 rounded-[40px] shadow-sm border-2 text-center font-black">
+              <span className="flex items-center text-center"><span className="text-green-600 mr-3 text-4xl text-center">○</span> 空き</span>
+              <span className="flex items-center text-center"><span className="text-orange-500 mr-3 text-4xl text-center">△</span> 混雑</span>
+              <span className="flex items-center text-center"><span className="text-gray-300 mr-3 text-4xl text-center">×</span> 満席</span>
+            </div>
           </div>
         )}
 
         {/* Step 4: Confirmation */}
         {!isAdminMode && step === 4 && (
-          <div className="animate-in slide-in-from-right pt-10 text-left text-left text-left text-left">
+          <div className="animate-in slide-in-from-right pt-10 text-left text-left text-left text-left text-left text-left">
             <h2 className="text-2xl font-black mb-10 border-l-8 border-[#b4927b] pl-6 text-slate-900 text-left">内容の確認</h2>
             <div className="bg-white rounded-[72px] p-16 border-2 shadow-2xl mb-16 text-left font-black text-left text-left">
               <div className="space-y-12 mb-12 text-left text-left">
@@ -409,7 +414,7 @@ export default function App() {
                 <div className="flex flex-col border-b-2 pb-8 text-slate-500 text-xl text-left text-left text-left"><span className="mb-4 text-left font-black text-left">日時</span><span className="text-3xl text-slate-900 leading-relaxed font-black text-left text-left">{selectedDate.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric' })} ({selectedDate.toLocaleDateString('ja-JP', { weekday: 'short' })}) <br/> {targetTime} 〜 {calculateEndTime(selectedDate, targetTime, selectedMenu ? selectedMenu.duration : GROUP_MIN)}</span></div>
               </div>
               <div className="bg-[#fcf8f5] rounded-[48px] p-12 shadow-inner border-2 border-white text-center text-center">
-                <label className="text-lg text-[#b4927b] mb-6 block uppercase tracking-widest font-black text-center text-center">お名前（LINE名）を入力してください</label>
+                <label className="text-lg text-[#b4927b] mb-6 block uppercase tracking-widest font-black text-center text-center text-center">お名前（LINE名）を入力してください</label>
                 <input type="text" value={customerName} onChange={(e) => setCustomerName(e.target.value)} className="w-full bg-white border-4 border-white rounded-[32px] py-8 px-10 text-4xl text-center focus:border-[#b4927b] outline-none transition-all shadow-xl font-black text-center text-center" placeholder="例：山田 太郎" />
               </div>
             </div>
@@ -444,12 +449,12 @@ export default function App() {
       {/* Footer Nav */}
       <footer className="fixed bottom-0 left-0 right-0 bg-white/98 border-t-4 border-gray-50 px-10 py-10 flex justify-around items-center z-30 shadow-[0_-20px_60px_rgba(0,0,0,0.08)] backdrop-blur-2xl text-center text-center text-center">
         <div className={`flex flex-col items-center cursor-pointer transition-all text-center text-center text-center ${!isAdminMode ? 'text-[#b4927b] scale-125' : 'text-slate-300'}`} onClick={() => {setStep(1); setIsAdminMode(false);}}>
-          <CalendarIcon size={56} strokeWidth={2.5} className="text-center"/><span className="text-[16px] font-black mt-3 uppercase tracking-widest text-center text-center">予約</span>
+          <CalendarIcon size={56} strokeWidth={2.5} className="text-center text-center"/><span className="text-[16px] font-black mt-3 uppercase tracking-widest text-center text-center">予約</span>
         </div>
         <div className={`flex flex-col items-center cursor-pointer transition-all text-center text-center text-center ${isAdminMode ? 'text-[#b4927b] scale-125' : 'text-slate-300'}`} onClick={() => { if(!isAdminMode) setStep(6); else setAdminTab('ledger'); }}>
-          <CalendarCheck size={56} strokeWidth={2.5} className="text-center"/><span className="text-[16px] font-black mt-3 uppercase tracking-widest text-center text-center text-center">台帳</span>
+          <CalendarCheck size={56} strokeWidth={2.5} className="text-center text-center"/><span className="text-[16px] font-black mt-3 uppercase tracking-widest text-center text-center text-center">台帳</span>
         </div>
-        <div className="flex flex-col items-center text-gray-300 text-center text-center"><Info size={56} strokeWidth={2.5} className="text-center"/><span className="text-[16px] font-black mt-3 uppercase tracking-widest text-center text-center">情報</span></div>
+        <div className="flex flex-col items-center text-gray-300 text-center text-center text-center"><Info size={56} strokeWidth={2.5} className="text-center text-center"/><span className="text-[16px] font-black mt-3 uppercase tracking-widest text-center text-center text-center">情報</span></div>
       </footer>
     </div>
   );
