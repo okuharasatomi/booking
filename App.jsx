@@ -30,7 +30,8 @@ import {
   AlertCircle,
   RefreshCw,
   XCircle,
-  Trash2
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
 
 // ==========================================
@@ -89,14 +90,15 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState(null);
   const [targetTime, setTargetTime] = useState('');
   const [loading, setLoading] = useState(false);
-  const [customerName, setCustomerName] = useState('LINEユーザー'); 
+  const [customerName, setCustomerName] = useState(localStorage.getItem('dance_user_name') || ''); 
   const [startDate, setStartDate] = useState(new Date());
   const [isAdminMode, setIsAdminMode] = useState(false);
   const [adminTab, setAdminTab] = useState('ledger');
   const [passInput, setPassInput] = useState('');
   const [initError, setInitError] = useState(null);
+  const [viewingRes, setViewingRes] = useState(null); // 詳細表示中の予約
 
-  // 1. 初期化
+  // 1. Firebase 初期化
   useEffect(() => {
     const init = async () => {
       try {
@@ -108,13 +110,13 @@ export default function App() {
         await signInAnonymously(auth);
       } catch (e) {
         console.error(e);
-        setInitError("Firebase接続エラー。ドメイン許可設定を確認してください。");
+        setInitError("Firebase接続エラー。匿名認証を確認してください。");
       }
     };
     init();
   }, []);
 
-  // 2. データ取得 (年月日を跨いでも安全に比較するための正規化関数含む)
+  // 2. データ取得
   useEffect(() => {
     if (!user || !fb.db) return;
     const resCol = collection(fb.db, 'artifacts', appIdString, 'public', 'data', 'reservations');
@@ -141,28 +143,23 @@ export default function App() {
     return end.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', hour12: false });
   };
 
-  // カレンダーの空き状況判定 (修正版: 年月日＋時間を厳密にチェック)
   const getSlotStatus = (date, rowTime) => {
     const dateKey = date.toLocaleDateString('ja-JP');
     const groupSlot = GROUP_SCHEDULES[date.getDay()];
     const isGroupSlotRow = groupSlot && (groupSlot.rowMatch === rowTime || groupSlot.time === rowTime);
     
-    // この枠に重なっている予約を抽出
     const bookingsAtThisTime = reservations.filter(res => {
       if (!res.date?.toDate) return false;
       const resDate = res.date.toDate();
       if (resDate.toLocaleDateString('ja-JP') !== dateKey) return false;
-      
       const resStart = resDate.getTime();
       const resDur = res.duration || 35;
       const resEnd = resStart + resDur * 60000;
-      
       const thisSlotStart = new Date(date);
       const [h, m] = rowTime.split(':');
       thisSlotStart.setHours(parseInt(h), parseInt(m), 0, 0);
       const thisSlotTime = thisSlotStart.getTime();
-      const thisSlotEnd = thisSlotTime + 10 * 60000; // 10分単位のマス目として判定
-
+      const thisSlotEnd = thisSlotTime + 10 * 60000;
       return thisSlotTime < resEnd && resStart < thisSlotEnd;
     });
 
@@ -170,40 +167,52 @@ export default function App() {
       ? bookingsAtThisTime.length >= LIMITS.private 
       : bookingsAtThisTime.length >= LIMITS.group;
 
+    const myBooking = bookingsAtThisTime.find(b => b.customerName === customerName && b.lessonType !== 'blocked');
     const isBlocked = bookingsAtThisTime.some(b => b.lessonType === 'blocked');
 
     if (lessonCategory === 'group') {
       if (!isGroupSlotRow) return { mark: '－', disabled: true, bookings: bookingsAtThisTime };
+      if (myBooking) return { mark: '★', disabled: false, groupInfo: groupSlot, bookings: bookingsAtThisTime, isMine: true };
       if (isBlocked || isFull) return { mark: '×', disabled: true, bookings: bookingsAtThisTime };
       return { mark: bookingsAtThisTime.length >= 1 ? '△' : '○', disabled: false, groupInfo: groupSlot, bookings: bookingsAtThisTime };
     } else {
-      // 個人レッスンの場合、選択中のメニューの長さ分空いているかチェック
+      if (myBooking) return { mark: '★', disabled: false, bookings: bookingsAtThisTime, isMine: true };
       const requiredBlock = selectedMenu ? selectedMenu.block : 35;
       const hasConflict = reservations.some(res => {
         if (!res.date?.toDate) return false;
         const resDate = res.date.toDate();
         if (resDate.toLocaleDateString('ja-JP') !== dateKey) return false;
-
         const resStart = resDate.getTime();
         const resDur = res.duration || 35;
         const resEnd = resStart + resDur * 60000;
-
         const start = new Date(date);
         const [h, m] = rowTime.split(':');
         start.setHours(parseInt(h), parseInt(m), 0, 0);
         const startTime = start.getTime();
         const endTime = startTime + requiredBlock * 60000;
-
         return startTime < resEnd && resStart < endTime;
       });
-
       if (hasConflict || isBlocked) return { mark: '×', disabled: true, bookings: bookingsAtThisTime };
       return { mark: '○', disabled: false, bookings: bookingsAtThisTime };
     }
   };
 
+  const handleSlotClick = (date, time, status) => {
+    if (isAdminMode) {
+      handleAdminSlotClick(date, time, status.bookings);
+      return;
+    }
+    if (status.isMine) {
+      setViewingRes(status.bookings.find(b => b.customerName === customerName));
+      return;
+    }
+    setSelectedDate(date);
+    setTargetTime(time);
+    setStep(4);
+  };
+
   const handleAdminSlotClick = async (date, time, bookings) => {
-    if (!isAdminMode || !user || !fb.db) return;
+    if (!fb.db) return;
     const resCol = collection(fb.db, 'artifacts', appIdString, 'public', 'data', 'reservations');
     if (bookings.length > 0) {
       const target = bookings[0];
@@ -223,6 +232,20 @@ export default function App() {
     }
   };
 
+  const handleCancelBooking = async (resId) => {
+    if (!window.confirm("この予約をキャンセルしますか？")) return;
+    try {
+      setLoading(true);
+      await deleteDoc(doc(fb.db, 'artifacts', appIdString, 'public', 'data', 'reservations', resId));
+      setViewingRes(null);
+      alert("キャンセルが完了しました。");
+    } catch (e) {
+      alert("エラーが発生しました。");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSubmit = async () => {
     if (!customerName.trim() || !user || !fb.db) return;
     setLoading(true);
@@ -238,8 +261,9 @@ export default function App() {
       await setDoc(doc(fb.db, 'artifacts', appIdString, 'public', 'data', 'customers', customerName), {
         name: customerName, lastReservedAt: Timestamp.now()
       }, { merge: true });
+      localStorage.setItem('dance_user_name', customerName);
       setStep(5);
-    } catch (err) { alert("予約に失敗しました。名前を確認してください。"); }
+    } catch (err) { alert("予約に失敗しました。"); }
     setLoading(false);
   };
 
@@ -269,40 +293,69 @@ export default function App() {
       </div>
 
       <main className="max-w-4xl mx-auto p-6">
-        {step === 6 && (
-          <div className="animate-in zoom-in duration-300 max-w-sm mx-auto pt-20 text-center text-center">
-            <Lock size={80} className="mx-auto mb-10 text-[#b4927b] text-center" />
-            <h2 className="text-3xl font-black mb-8 text-center">管理者ログイン</h2>
-            <input type="password" autoFocus value={passInput} onChange={(e) => setPassInput(e.target.value)} placeholder="合言葉" className="w-full bg-white border-4 rounded-[40px] py-8 text-center text-4xl font-black tracking-widest mb-8 shadow-inner text-center" />
-            <button onClick={() => passInput === ADMIN_PASSWORD ? (setIsAdminMode(true), setStep(3)) : alert("違います")} className="w-full bg-[#b4927b] text-white font-black py-8 rounded-[40px] shadow-2xl text-3xl text-center">ログイン</button>
-          </div>
-        )}
-
-        {!isAdminMode && step === 1 && (
-          <div className="animate-in fade-in pt-16 text-center text-center">
-            <h2 className="text-3xl font-black mb-12 border-l-8 border-[#b4927b] pl-8 text-left text-slate-900">メニュー選択</h2>
-            <div className="grid grid-cols-1 gap-10 text-center">
-              <button onClick={() => {setLessonCategory('private'); setStep(2);}} className="w-full bg-white p-12 rounded-[64px] border-4 shadow-xl flex items-center justify-between active:scale-95 transition-all group text-center">
-                <div className="text-left font-black"><div className="text-4xl text-slate-900 group-hover:text-[#b4927b] text-left">個人レッスン</div><div className="text-xl text-slate-500 mt-2 text-left">1枠25分〜。マンツーマン</div></div>
-                <User size={80} className="text-[#b4927b] text-center"/>
-              </button>
-              <button onClick={() => {setLessonCategory('group'); setSelectedMenu(null); setStep(3);}} className="w-full bg-white p-12 rounded-[64px] border-4 shadow-xl flex items-center justify-between active:scale-95 transition-all group text-center">
-                <div className="text-left font-black"><div className="text-4xl text-slate-900 group-hover:text-[#b4927b] text-left">少人数グループ</div><div className="text-xl text-slate-500 mt-2 text-left">水・木・金</div></div>
-                <Users size={80} className="text-[#b4927b] text-center"/>
+        {/* User Reservation Detail / Cancel Modal */}
+        {viewingRes && (
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-6 animate-in fade-in duration-200">
+            <div className="bg-white w-full max-w-lg rounded-[64px] p-12 shadow-2xl relative">
+              <button onClick={() => setViewingRes(null)} className="absolute top-8 right-8 text-gray-400"><XCircle size={48}/></button>
+              <h2 className="text-3xl font-black mb-8 border-l-8 border-[#b4927b] pl-6">予約の詳細確認</h2>
+              <div className="space-y-8 mb-12">
+                <div className="flex justify-between items-center border-b pb-4"><span className="text-gray-400 font-black">お名前</span><span className="text-2xl font-black">{viewingRes.customerName} 様</span></div>
+                <div className="flex justify-between items-center border-b pb-4"><span className="text-gray-400 font-black">日時</span><span className="text-2xl font-black">{viewingRes.date.toDate().toLocaleDateString('ja-JP', {month:'long', day:'numeric', weekday:'short'})} {viewingRes.date.toDate().toLocaleTimeString('ja-JP', {hour:'2-digit', minute:'2-digit'})} 〜</span></div>
+                <div className="flex justify-between items-center border-b pb-4"><span className="text-gray-400 font-black">種類</span><span className="text-2xl font-black text-[#b4927b]">{viewingRes.lessonType === 'private' ? '個人レッスン' : 'グループ'}</span></div>
+              </div>
+              <div className="bg-red-50 p-6 rounded-3xl mb-8 flex items-start space-x-4">
+                <AlertTriangle className="text-red-500 shrink-0" size={24} />
+                <p className="text-sm text-red-700 font-bold leading-relaxed">キャンセルは前日までにお願いいたします。当日の取り消しは公式LINEへ直接ご連絡ください。</p>
+              </div>
+              <button onClick={() => handleCancelBooking(viewingRes.id)} disabled={loading} className="w-full bg-red-500 text-white font-black py-8 rounded-full shadow-xl active:scale-95 transition-all text-2xl flex items-center justify-center">
+                {loading ? <RefreshCw className="animate-spin mr-2"/> : <Trash2 className="mr-2"/>}
+                この予約をキャンセルする
               </button>
             </div>
           </div>
         )}
 
+        {step === 6 && (
+          <div className="animate-in zoom-in duration-300 max-w-sm mx-auto pt-20 text-center">
+            <Lock size={80} className="mx-auto mb-10 text-[#b4927b]" />
+            <h2 className="text-3xl font-black mb-8">管理者ログイン</h2>
+            <input type="password" autoFocus value={passInput} onChange={(e) => setPassInput(e.target.value)} placeholder="合言葉" className="w-full bg-white border-4 rounded-[40px] py-8 text-center text-4xl font-black tracking-widest mb-8 shadow-inner" />
+            <button onClick={() => passInput === ADMIN_PASSWORD ? (setIsAdminMode(true), setStep(3)) : alert("違います")} className="w-full bg-[#b4927b] text-white font-black py-8 rounded-[40px] shadow-2xl text-3xl">ログイン</button>
+          </div>
+        )}
+
+        {!isAdminMode && step === 1 && (
+          <div className="animate-in fade-in pt-16">
+            <h2 className="text-3xl font-black mb-12 border-l-8 border-[#b4927b] pl-8 text-slate-900">メニューを選択</h2>
+            <div className="grid grid-cols-1 gap-10">
+              <button onClick={() => {setLessonCategory('private'); setStep(2);}} className="w-full bg-white p-12 rounded-[64px] border-4 shadow-xl flex items-center justify-between active:scale-95 transition-all group">
+                <div className="text-left font-black"><div className="text-4xl text-slate-900 group-hover:text-[#b4927b]">個人レッスン</div><div className="text-xl text-slate-500 mt-2">1枠25分〜。マンツーマン</div></div>
+                <User size={80} className="text-[#b4927b]"/>
+              </button>
+              <button onClick={() => {setLessonCategory('group'); setSelectedMenu(null); setStep(3);}} className="w-full bg-white p-12 rounded-[64px] border-4 shadow-xl flex items-center justify-between active:scale-95 transition-all group">
+                <div className="text-left font-black"><div className="text-4xl text-slate-900 group-hover:text-[#b4927b]">少人数グループ</div><div className="text-xl text-slate-500 mt-2">水・木・金</div></div>
+                <Users size={80} className="text-[#b4927b]"/>
+              </button>
+            </div>
+            {customerName && (
+              <div className="mt-16 bg-[#f5f2f0] p-8 rounded-[48px] border-2 border-dashed border-[#b4927b]/30 text-center">
+                <p className="text-lg font-black text-slate-500">おかえりなさい、<span className="text-[#b4927b]">{customerName}</span> 様</p>
+                <p className="text-sm font-bold text-slate-400 mt-1">台帳から自分の予約（★印）を確認・変更できます</p>
+              </div>
+            )}
+          </div>
+        )}
+
         {!isAdminMode && step === 2 && (
-          <div className="animate-in slide-in-from-right pt-10 text-left text-left">
-            <button onClick={() => setStep(1)} className="text-xl font-black text-slate-500 mb-12 flex items-center hover:text-black font-black text-left"><ChevronLeft size={40}/> 戻る</button>
-            <h2 className="text-2xl font-black mb-10 border-l-8 border-[#b4927b] pl-6 text-slate-900 text-left">レッスン数</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-8 text-left">
+          <div className="animate-in slide-in-from-right pt-10 text-left">
+            <button onClick={() => setStep(1)} className="text-xl font-black text-slate-500 mb-12 flex items-center hover:text-black font-black"><ChevronLeft size={40}/> 戻る</button>
+            <h2 className="text-2xl font-black mb-10 border-l-8 border-[#b4927b] pl-6 text-slate-900">レッスン数</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-8">
               {PRIVATE_MENUS.map(menu => (
-                <button key={menu.id} onClick={() => {setSelectedMenu(menu); setStep(3);}} className="bg-white p-12 rounded-[48px] border-2 text-center shadow-xl active:scale-95 font-black text-3xl group text-center">
-                  <span className="group-hover:text-[#b4927b] transition-colors text-center">{menu.name.replace('個人 ', '')}</span>
-                  <div className="text-xl text-slate-500 mt-4 font-black text-center">{menu.description}</div>
+                <button key={menu.id} onClick={() => {setSelectedMenu(menu); setStep(3);}} className="bg-white p-12 rounded-[48px] border-2 text-center shadow-xl active:scale-95 font-black text-3xl group">
+                  <span className="group-hover:text-[#b4927b] transition-colors">{menu.name.replace('個人 ', '')}</span>
+                  <div className="text-xl text-slate-500 mt-4 font-black">{menu.description}</div>
                 </button>
               ))}
             </div>
@@ -310,55 +363,58 @@ export default function App() {
         )}
 
         {step === 3 && (
-          <div className="animate-in fade-in pt-10 text-center font-black text-center">
-            {!isAdminMode && <button onClick={() => setStep(lessonCategory === 'private' ? 2 : 1)} className="text-xl font-black text-slate-500 mb-8 flex items-center hover:text-black text-center"><ChevronLeft size={32}/> メニューに戻る</button>}
+          <div className="animate-in fade-in pt-10 text-center font-black">
+            {!isAdminMode && <button onClick={() => setStep(lessonCategory === 'private' ? 2 : 1)} className="text-xl font-black text-slate-500 mb-8 flex items-center hover:text-black"><ChevronLeft size={32}/> メニューに戻る</button>}
             {isAdminMode && (
-              <div className="flex bg-white rounded-full p-2 border-2 mb-10 max-w-sm mx-auto shadow-sm text-center">
-                <button onClick={() => setAdminTab('ledger')} className={`flex-1 py-4 text-xl font-black rounded-full transition-all text-center ${adminTab === 'ledger' ? 'bg-[#b4927b] text-white shadow-md' : 'text-slate-500'}`}>予約台帳</button>
-                <button onClick={() => setAdminTab('tickets')} className={`flex-1 py-4 text-xl font-black rounded-full transition-all text-center ${adminTab === 'tickets' ? 'bg-[#b4927b] text-white shadow-md' : 'text-slate-500'}`}>生徒管理</button>
+              <div className="flex bg-white rounded-full p-2 border-2 mb-10 max-w-sm mx-auto shadow-sm">
+                <button onClick={() => setAdminTab('ledger')} className={`flex-1 py-4 text-xl font-black rounded-full transition-all ${adminTab === 'ledger' ? 'bg-[#b4927b] text-white shadow-md' : 'text-slate-500'}`}>予約台帳</button>
+                <button onClick={() => setAdminTab('tickets')} className={`flex-1 py-4 text-xl font-black rounded-full transition-all ${adminTab === 'tickets' ? 'bg-[#b4927b] text-white shadow-md' : 'text-slate-500'}`}>生徒管理</button>
               </div>
             )}
             
             {adminTab === 'ledger' ? (
               <>
-                <div className="flex justify-center items-center space-x-6 mb-8 text-center">
-                  <button onClick={() => {const d = new Date(startDate); d.setDate(d.getDate()-7); setStartDate(d);}} className="p-4 bg-white rounded-3xl border-2 active:bg-gray-50 text-center text-center"><ChevronLeft size={32}/></button>
-                  <span className="text-2xl font-black text-center">{startDate.getMonth()+1}月 {startDate.getDate()}日〜</span>
-                  <button onClick={() => {const d = new Date(startDate); d.setDate(d.getDate()+7); setStartDate(d);}} className="p-4 bg-white rounded-3xl border-2 active:bg-gray-50 text-center text-center"><ChevronRight size={32}/></button>
+                <div className="flex justify-center items-center space-x-6 mb-8">
+                  <button onClick={() => {const d = new Date(startDate); d.setDate(d.getDate()-7); setStartDate(d);}} className="p-4 bg-white rounded-3xl border-2 active:bg-gray-50"><ChevronLeft size={32}/></button>
+                  <span className="text-2xl font-black">{startDate.getMonth()+1}月 {startDate.getDate()}日〜</span>
+                  <button onClick={() => {const d = new Date(startDate); d.setDate(d.getDate()+7); setStartDate(d);}} className="p-4 bg-white rounded-3xl border-2 active:bg-gray-50"><ChevronRight size={32}/></button>
                 </div>
                 
-                <div className="bg-white rounded-[64px] shadow-2xl border-4 border-white overflow-x-auto no-scrollbar text-center">
-                  <table className="w-full border-collapse min-w-[700px] text-center">
-                    <thead className="bg-[#fcf8f5] text-center">
-                      <tr className="text-center font-black"><th className="py-10 text-2xl font-black border-r-4 text-center">時間</th>
+                <div className="bg-white rounded-[64px] shadow-2xl border-4 border-white overflow-x-auto no-scrollbar">
+                  <table className="w-full border-collapse min-w-[700px]">
+                    <thead className="bg-[#fcf8f5]">
+                      <tr className="font-black"><th className="py-10 text-2xl font-black border-r-4">時間</th>
                         {Array.from({ length: 7 }, (_, i) => {
                           const d = new Date(startDate); d.setDate(d.getDate() + i);
-                          return <th key={i} className="py-10 font-black text-center"><div className={`text-lg mb-2 text-center ${d.getDay() === 0 ? 'text-red-500' : d.getDay() === 6 ? 'text-blue-500' : 'text-slate-500'}`}>{['日','月','火','水','木','金','土'][d.getDay()]}</div><div className="text-3xl text-center">{d.getDate()}</div></th>;
+                          return <th key={i} className="py-10 font-black"><div className={`text-lg mb-2 ${d.getDay() === 0 ? 'text-red-500' : d.getDay() === 6 ? 'text-blue-500' : 'text-slate-500'}`}>{['日','月','火','水','木','金','土'][d.getDay()]}</div><div className="text-3xl">{d.getDate()}</div></th>;
                         })}
                       </tr>
                     </thead>
-                    <tbody className="divide-y-4 divide-slate-50 text-slate-900 text-center">
+                    <tbody className="divide-y-4 divide-slate-50 text-slate-900">
                       {TIME_SLOTS.map((time) => (
-                        <tr key={time} className="h-24 text-center">
-                          <td className="bg-white text-xl font-black border-r-4 text-center">{time}</td>
+                        <tr key={time} className="h-24">
+                          <td className="bg-white text-xl font-black border-r-4">{time}</td>
                           {Array.from({ length: 7 }, (_, i) => {
                             const d = new Date(startDate); d.setDate(d.getDate() + i);
                             const status = getSlotStatus(d, time);
-                            return <td key={i} className="p-2 border-r-2 last:border-r-0 text-center">
-                              {isAdminMode ? (
-                                <button onClick={() => handleAdminSlotClick(d, time, status.bookings)} className="w-full h-full flex items-center justify-center hover:bg-gray-100 rounded-2xl text-center">
-                                  {status.bookings.length > 0 ? (
-                                    <div className={`text-[10px] p-2 rounded-xl w-full truncate text-white text-center font-black ${status.bookings[0].lessonType === 'blocked' ? 'bg-gray-400' : 'bg-[#b4927b]'}`}>
-                                      {status.bookings[0].customerName}
-                                    </div>
-                                  ) : <span className="text-gray-100 text-4xl text-center">○</span>}
-                                </button>
-                              ) : (
-                                <button disabled={status.disabled} onClick={() => { setSelectedDate(d); setTargetTime(time); setStep(4); }} className={`w-full h-full rounded-2xl flex flex-col items-center justify-center transition-all text-center ${status.disabled ? 'text-gray-100 bg-slate-50' : 'text-[#b4927b] hover:bg-[#fcf8f5] active:scale-90 text-center'}`}>
-                                  {status.groupInfo && <span className="text-[10px] bg-white border-2 rounded-full px-2 mb-1 shadow-xs text-center">{status.groupInfo.time}</span>}
-                                  <span className="text-6xl font-black text-center">{status.mark}</span>
-                                </button>
-                              )}
+                            return <td key={i} className="p-2 border-r-2 last:border-r-0">
+                              <button 
+                                disabled={status.disabled && !status.isMine && !isAdminMode} 
+                                onClick={() => handleSlotClick(d, time, status)} 
+                                className={`w-full h-full rounded-2xl flex flex-col items-center justify-center transition-all ${
+                                  status.isMine ? 'bg-[#b4927b] text-white shadow-lg border-4 border-[#8c6d58]' :
+                                  status.disabled ? 'text-gray-100 bg-slate-50' : 'text-[#b4927b] hover:bg-[#fcf8f5] active:scale-90'
+                                }`}
+                              >
+                                {status.groupInfo && <span className={`text-[10px] rounded-full px-2 mb-1 shadow-xs ${status.isMine ? 'bg-white/20' : 'bg-white border-2'}`}>{status.groupInfo.time}</span>}
+                                {isAdminMode && status.bookings.length > 0 ? (
+                                  <div className={`text-[10px] p-1 rounded w-full truncate font-black ${status.bookings[0].lessonType === 'blocked' ? 'bg-slate-400' : 'bg-white text-[#b4927b]'}`}>
+                                    {status.bookings[0].customerName}
+                                  </div>
+                                ) : (
+                                  <span className={`text-6xl font-black ${status.isMine ? 'animate-pulse' : ''}`}>{status.mark}</span>
+                                )}
+                              </button>
                             </td>;
                           })}
                         </tr>
@@ -366,63 +422,63 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
-                <div className="mt-12 flex justify-center space-x-12 text-2xl font-black uppercase bg-white py-10 rounded-[40px] shadow-sm border-2 text-center text-center">
-                  <span className="flex items-center text-center"><span className="text-green-600 mr-3 text-5xl text-center">○</span> 予約可</span>
-                  <span className="flex items-center text-center"><span className="text-orange-500 mr-3 text-5xl text-center">△</span> 残少</span>
-                  <span className="flex items-center text-center"><span className="text-gray-300 mr-3 text-5xl text-center">×</span> 満席</span>
+                <div className="mt-12 flex justify-center space-x-12 text-2xl font-black uppercase bg-white py-10 rounded-[40px] shadow-sm border-2">
+                  <span className="flex items-center"><span className="text-green-600 mr-3 text-5xl">○</span> 予約可</span>
+                  <span className="flex items-center"><span className="text-[#b4927b] mr-3 text-5xl">★</span> 自分の予約</span>
+                  <span className="flex items-center"><span className="text-gray-300 mr-3 text-5xl">×</span> 満席</span>
                 </div>
               </>
             ) : (
-              <div className="space-y-6 text-left text-left">
+              <div className="space-y-6 text-left">
                 {customers.map(cust => (
-                  <div key={cust.id} className="bg-white p-10 rounded-[64px] border-4 flex items-center justify-between shadow-xl text-left">
-                    <div className="text-left font-black"><div className="text-4xl text-left">{cust.name} 様</div><div className="text-xl text-slate-400 mt-2 text-left">残チケット: {cust.tickets || 0}枚</div></div>
-                    <div className="flex space-x-4 text-center"><button onClick={() => adjustTickets(cust.id, 1)} className="p-6 bg-[#fcf8f5] text-[#b4927b] rounded-3xl text-center"><Plus size={40}/></button><button onClick={() => adjustTickets(cust.id, -1)} className="p-6 bg-slate-100 rounded-3xl text-center"><Minus size={40}/></button></div>
+                  <div key={cust.id} className="bg-white p-10 rounded-[64px] border-4 flex items-center justify-between shadow-xl">
+                    <div className="text-left font-black"><div className="text-4xl">{cust.name} 様</div><div className="text-xl text-slate-400 mt-2">残チケット: {cust.tickets || 0}枚</div></div>
+                    <div className="flex space-x-4"><button onClick={() => adjustTickets(cust.id, 1)} className="p-6 bg-[#fcf8f5] text-[#b4927b] rounded-3xl"><Plus size={40}/></button><button onClick={() => adjustTickets(cust.id, -1)} className="p-6 bg-slate-100 rounded-3xl"><Minus size={40}/></button></div>
                   </div>
                 ))}
-                {customers.length === 0 && <div className="py-20 text-slate-400 text-2xl text-center">生徒データがありません</div>}
+                {customers.length === 0 && <div className="py-20 text-slate-400 text-2xl text-center font-black">生徒データがありません</div>}
               </div>
             )}
           </div>
         )}
 
         {!isAdminMode && step === 4 && (
-          <div className="animate-in slide-in-from-right pt-16 text-center text-center">
-            <h2 className="text-4xl font-black mb-12 text-center">ご予約内容の確認</h2>
-            <div className="bg-white rounded-[80px] p-20 border-4 shadow-2xl mb-16 text-left font-black text-left">
-              <div className="space-y-12 mb-16 font-black text-left">
-                <div className="flex justify-between border-b-4 pb-10 text-2xl text-slate-500 text-left"><span>メニュー</span><span className="text-4xl text-[#b4927b] text-right font-black">{selectedMenu ? selectedMenu.name : '少人数グループ'}</span></div>
-                <div className="flex flex-col border-b-4 pb-10 text-2xl text-slate-500 text-left"><span className="mb-6 text-center text-center font-black">予約日時</span><span className="text-5xl text-slate-900 leading-tight text-center font-black text-center">{selectedDate.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })}<br/>{targetTime} 〜 {calculateEndTime(selectedDate, targetTime, selectedMenu ? selectedMenu.duration : GROUP_MIN)}</span></div>
+          <div className="animate-in slide-in-from-right pt-16 text-center">
+            <h2 className="text-4xl font-black mb-12 text-slate-900">ご予約内容の確認</h2>
+            <div className="bg-white rounded-[72px] p-16 border-2 shadow-2xl mb-16 text-left font-black">
+              <div className="space-y-12 mb-12">
+                <div className="flex justify-between border-b-2 pb-8 text-slate-500 text-xl text-left"><span>メニュー</span><span className="text-3xl text-[#b4927b] font-black text-right">{selectedMenu ? selectedMenu.name : '少人数グループ'}</span></div>
+                <div className="flex flex-col border-b-2 pb-8 text-slate-500 text-xl text-left"><span className="mb-4 text-left font-black">予約日時</span><span className="text-3xl text-slate-900 leading-relaxed font-black text-left">{selectedDate.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })} <br/> {targetTime} 〜 {calculateEndTime(selectedDate, targetTime, selectedMenu ? selectedMenu.duration : GROUP_MIN)}</span></div>
               </div>
-              <div className="bg-[#fcf8f5] rounded-[60px] p-16 shadow-inner border-4 border-white text-center text-center">
-                <label className="text-2xl text-[#b4927b] mb-10 block font-black uppercase text-center text-center">お名前（LINE名）を入力</label>
-                <input type="text" value={customerName} onChange={(e) => setCustomerName(e.target.value)} className="w-full bg-white border-4 border-white rounded-[40px] py-10 px-12 text-6xl text-center focus:border-[#b4927b] outline-none shadow-2xl font-black text-center" placeholder="例：山田 太郎" />
+              <div className="bg-[#fcf8f5] rounded-[48px] p-12 shadow-inner border-2 border-white text-center">
+                <label className="text-lg text-[#b4927b] mb-6 block uppercase tracking-widest font-black text-center">お名前（LINE名）を入力してください</label>
+                <input type="text" value={customerName} onChange={(e) => setCustomerName(e.target.value)} className="w-full bg-white border-4 border-white rounded-[32px] py-8 px-10 text-4xl text-center focus:border-[#b4927b] outline-none shadow-xl font-black text-center" placeholder="例：山田 太郎" />
               </div>
             </div>
-            <button onClick={handleSubmit} disabled={loading || !customerName.trim()} className="w-full bg-[#b4927b] text-white font-black py-14 rounded-full shadow-2xl active:scale-95 disabled:bg-gray-200 text-5xl tracking-widest text-center">{loading ? "送信中..." : "予約を確定する"}</button>
+            <button onClick={handleSubmit} disabled={loading || !customerName.trim()} className="w-full bg-[#b4927b] text-white font-black py-14 rounded-full shadow-2xl active:scale-95 disabled:bg-gray-200 text-5xl tracking-widest text-center transition-all">{loading ? "送信中..." : "予約を確定する"}</button>
             <button onClick={() => setStep(3)} className="w-full mt-10 text-2xl text-slate-400 font-black text-center">カレンダーに戻る</button>
           </div>
         )}
 
         {!isAdminMode && step === 5 && (
-          <div className="text-center py-48 animate-in zoom-in px-8 text-center">
-            <Check size={180} strokeWidth={4} className="mx-auto mb-20 text-green-500 bg-green-50 rounded-full p-12 shadow-2xl border-8 border-white text-center" />
-            <h2 className="text-8xl font-black mb-12 text-slate-900 text-center">予約完了！</h2>
-            <p className="text-4xl text-slate-600 font-bold mb-32 leading-relaxed text-center">ご予約ありがとうございます。<br/>当日、お待ちしております。</p>
-            <button onClick={() => setStep(1)} className="w-full py-12 bg-[#b4927b] text-white font-black rounded-full shadow-2xl text-5xl active:scale-95 transition-all text-center">トップへ戻る</button>
+          <div className="text-center py-40 animate-in zoom-in px-4 text-center">
+            <Check size={140} strokeWidth={4} className="mx-auto mb-16 text-green-500 bg-green-50 rounded-full p-10 shadow-2xl border-8 border-white text-center" />
+            <h2 className="text-7xl font-serif font-black mb-10 text-slate-900 text-center">予約完了！</h2>
+            <p className="text-3xl text-slate-600 font-bold mb-24 leading-relaxed text-center">ご予約ありがとうございます。<br/>当日、お待ちしております。</p>
+            <button onClick={() => setStep(1)} className="w-full py-10 bg-[#b4927b] text-white font-black rounded-full shadow-2xl text-4xl active:scale-95 transition-all text-center">トップへ戻る</button>
           </div>
         )}
       </main>
 
       {/* Footer Navigation */}
-      <footer className="fixed bottom-0 left-0 right-0 bg-white/95 px-10 py-10 flex justify-around items-center z-30 shadow-[0_-20px_50px_rgba(0,0,0,0.1)] backdrop-blur-xl border-t-4 border-gray-50 text-center">
+      <footer className="fixed bottom-0 left-0 right-0 bg-white/98 border-t-4 border-gray-50 px-10 py-10 flex justify-around items-center z-30 shadow-[0_-20px_50px_rgba(0,0,0,0.1)] backdrop-blur-2xl text-center">
         <div className={`flex flex-col items-center cursor-pointer transition-all text-center ${!isAdminMode ? 'text-[#b4927b] scale-150' : 'text-slate-300'}`} onClick={() => {setStep(1); setIsAdminMode(false);}}>
-          <CalendarIcon size={64} strokeWidth={3} className="text-center"/><span className="text-lg font-black mt-2 text-center">予約</span>
+          <CalendarIcon size={56} strokeWidth={2.5}/><span className="text-[16px] font-black mt-3 uppercase tracking-widest text-center">予約</span>
         </div>
         <div className={`flex flex-col items-center cursor-pointer transition-all text-center ${isAdminMode ? 'text-[#b4927b] scale-150' : 'text-slate-300'}`} onClick={() => { if(!isAdminMode) setStep(6); else setAdminTab('ledger'); }}>
-          <CalendarCheck size={64} strokeWidth={3} className="text-center"/><span className="text-lg font-black mt-2 text-center">台帳</span>
+          <CalendarCheck size={56} strokeWidth={2.5}/><span className="text-[16px] font-black mt-3 uppercase tracking-widest text-center">台帳</span>
         </div>
-        <div className="flex flex-col items-center text-gray-300 text-center"><Info size={64} strokeWidth={3} className="text-center"/><span className="text-lg font-black mt-2 text-center">情報</span></div>
+        <div className="flex flex-col items-center text-gray-300"><Info size={56} strokeWidth={2.5}/><span className="text-[16px] font-black mt-3 uppercase tracking-widest">情報</span></div>
       </footer>
     </div>
   );
